@@ -11,6 +11,9 @@ api.interceptors.request.use((config) => {
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
+  if (typeof window !== "undefined" && window.location?.origin) {
+    config.headers["x-client-url"] = window.location.origin;
+  }
   return config;
 });
 

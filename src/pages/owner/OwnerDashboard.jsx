@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import QRCode from "qrcode";
 import api from "../../api/axiosInstance";
 import { useAuth } from "../../context/AuthContext";
 
@@ -527,13 +528,39 @@ const TableManager = () => {
   const [tableNumber, setTableNumber] = useState("");
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(true);
+  const [copiedId, setCopiedId] = useState(null);
 
-  const loadTables = () => {
+  const loadTables = async () => {
     setFetching(true);
-    api.get("/tables")
-      .then(({ data }) => setTables(data))
-      .catch((err) => console.error("Failed to load tables:", err))
-      .finally(() => setFetching(false));
+    try {
+      const { data } = await api.get("/tables");
+      const origin = window.location.origin;
+
+      // Ensure every table has a high-res QR code pointing directly to current frontend origin
+      const enriched = await Promise.all(
+        data.map(async (item) => {
+          const directUrl = `${origin}/order?table=${item.table.qrToken}`;
+          let qr = item.qrCodeImage;
+          try {
+            qr = await QRCode.toDataURL(directUrl, {
+              width: 400,
+              margin: 2,
+              color: { dark: "#0f172a", light: "#ffffff" }
+            });
+          } catch (_) {}
+          return {
+            ...item,
+            orderingUrl: directUrl,
+            qrCodeImage: qr
+          };
+        })
+      );
+      setTables(enriched);
+    } catch (err) {
+      console.error("Failed to load tables:", err);
+    } finally {
+      setFetching(false);
+    }
   };
 
   useEffect(() => {
@@ -554,6 +581,12 @@ const TableManager = () => {
     }
   };
 
+  const copyLink = (tableId, url) => {
+    navigator.clipboard.writeText(url);
+    setCopiedId(tableId);
+    setTimeout(() => setCopiedId(null), 2500);
+  };
+
   return (
     <div className="space-y-6">
       {/* Create Table */}
@@ -562,7 +595,7 @@ const TableManager = () => {
           <span>➕</span> Add Restaurant Dining Table
         </h3>
         <p className="text-xs text-slate-400 mb-4">
-          Each table receives a unique QR code. Diners scan it to place orders directly into the kitchen.
+          Each table receives a unique scannable QR code encoded with your deployed frontend URL (<code>{window.location.origin}</code>).
         </p>
         <form onSubmit={handleCreate} className="flex gap-3 max-w-md">
           <input
@@ -570,7 +603,7 @@ const TableManager = () => {
             placeholder="Table number (e.g. 1)"
             value={tableNumber}
             onChange={(e) => setTableNumber(e.target.value)}
-            className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white flex-1"
+            className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white flex-1 focus:outline-none focus:border-indigo-500"
             required
           />
           <button
@@ -585,9 +618,17 @@ const TableManager = () => {
 
       {/* Tables Grid */}
       <div>
-        <h3 className="text-sm font-bold text-white mb-4">
-          🪑 Registered Tables & Digital QR Cards ({tables.length})
-        </h3>
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-sm font-bold text-white">
+            🪑 Registered Tables & Digital QR Cards ({tables.length})
+          </h3>
+          <button
+            onClick={loadTables}
+            className="text-xs text-slate-400 hover:text-white border border-slate-800 bg-slate-900 px-3 py-1 rounded-lg transition-colors cursor-pointer"
+          >
+            🔄 Refresh Tables
+          </button>
+        </div>
 
         {fetching ? (
           <div className="p-8 text-center bg-slate-900/50 border border-slate-800 rounded-2xl text-xs text-slate-400">
@@ -599,8 +640,8 @@ const TableManager = () => {
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-            {tables.map(({ table, qrCodeImage }) => (
-              <div key={table._id} className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 text-center flex flex-col justify-between">
+            {tables.map(({ table, qrCodeImage, orderingUrl }) => (
+              <div key={table._id} className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 text-center flex flex-col justify-between hover:border-slate-700 transition-all">
                 <div>
                   <div className="flex justify-between items-center mb-3">
                     <span className="font-bold text-sm text-white">Table {table.tableNumber}</span>
@@ -609,23 +650,36 @@ const TableManager = () => {
                     </span>
                   </div>
 
-                  <div className="bg-white p-3 rounded-xl inline-block shadow-inner mb-3">
+                  <div className="bg-white p-3 rounded-xl inline-block shadow-inner mb-2">
                     <img
                       src={qrCodeImage}
                       alt={`QR for table ${table.tableNumber}`}
                       className="w-32 h-32 mx-auto"
                     />
                   </div>
+
+                  <p className="text-[10px] text-slate-400 font-mono truncate px-1 mb-2" title={orderingUrl}>
+                    {orderingUrl}
+                  </p>
                 </div>
 
-                <div className="space-y-2 pt-2 border-t border-slate-800">
-                  <a
-                    href={qrCodeImage}
-                    download={`table-${table.tableNumber}-qr.png`}
-                    className="w-full text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 py-1.5 rounded-lg block transition-colors border border-slate-700"
-                  >
-                    📥 Download QR
-                  </a>
+                <div className="space-y-1.5 pt-2 border-t border-slate-800">
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <a
+                      href={qrCodeImage}
+                      download={`table-${table.tableNumber}-qr.png`}
+                      className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 py-1.5 rounded-lg block transition-colors border border-slate-700 text-center"
+                    >
+                      📥 Download
+                    </a>
+                    <button
+                      onClick={() => copyLink(table._id, orderingUrl)}
+                      className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 py-1.5 rounded-lg block transition-colors border border-slate-700 text-center cursor-pointer"
+                    >
+                      {copiedId === table._id ? "✅ Copied!" : "📋 Copy Link"}
+                    </button>
+                  </div>
+
                   <a
                     href={`/menu?table=${table.qrToken}`}
                     target="_blank"

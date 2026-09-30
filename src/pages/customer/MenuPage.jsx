@@ -4,9 +4,13 @@ import api from "../../api/axiosInstance";
 import { useAuth } from "../../context/AuthContext";
 
 const MenuPage = () => {
-  const [searchParams] = useSearchParams();
-  const qrToken = searchParams.get("table");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlTableParam = searchParams.get("table");
   const { user, logout } = useAuth();
+
+  const [qrToken, setQrToken] = useState(() => {
+    return urlTableParam || localStorage.getItem("resto_table_token") || "";
+  });
 
   const [table, setTable] = useState(null);
   const [menuItems, setMenuItems] = useState([]);
@@ -15,25 +19,100 @@ const MenuPage = () => {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
+  const [billStatus, setBillStatus] = useState(null); // { requested: true, amount: 0 }
+
+  // Available tables when no table is selected
+  const [availableTables, setAvailableTables] = useState([]);
+  const [loadingTables, setLoadingTables] = useState(false);
+  const [manualToken, setManualToken] = useState("");
+
+  // Sync token from URL param if present
+  useEffect(() => {
+    if (urlTableParam) {
+      localStorage.setItem("resto_table_token", urlTableParam);
+      setQrToken(urlTableParam);
+    }
+  }, [urlTableParam]);
 
   // Step 1: resolve the QR token into table + restaurant info
   useEffect(() => {
-    if (!qrToken) return;
+    if (!qrToken) {
+      // If no token, fetch public tables for selection
+      setLoadingTables(true);
+      api
+        .get("/tables/public")
+        .then(({ data }) => setAvailableTables(data))
+        .catch(() => {})
+        .finally(() => setLoadingTables(false));
+      return;
+    }
+
     api
       .get(`/tables/token/${qrToken}`)
-      .then(({ data }) => setTable(data))
-      .catch(() => setError("Invalid or expired table QR code."));
+      .then(({ data }) => {
+        setTable(data);
+        localStorage.setItem("resto_table_token", qrToken);
+        setError("");
+      })
+      .catch(() => {
+        setError("Invalid or expired table QR code. Please pick a table below.");
+        localStorage.removeItem("resto_table_token");
+        setQrToken("");
+      });
   }, [qrToken]);
 
-  // Step 2: once we know the restaurant, load its menu
+  // Step 2: once we know the restaurant, load its menu & existing sessions
   useEffect(() => {
     if (!table) return;
     const rId = table.restaurantId?._id || table.restaurantId;
+
+    // Load Menu
     api
       .get(`/menu/${rId}`)
       .then(({ data }) => setMenuItems(data))
       .catch(() => setError("Failed to load restaurant menu"));
+
+    // Check for existing active session on this table so diner doesn't have to restart
+    api
+      .get(`/sessions/table/${table._id}`)
+      .then(({ data }) => {
+        if (data && data.length > 0) {
+          const active = data[0];
+          setSessionId(active._id);
+          if (active.status === "bill_requested") {
+            setBillStatus({ requested: true });
+          }
+        }
+      })
+      .catch(() => {});
   }, [table]);
+
+  const handleSelectTable = (selectedTable) => {
+    if (selectedTable?.qrToken) {
+      localStorage.setItem("resto_table_token", selectedTable.qrToken);
+      setSearchParams({ table: selectedTable.qrToken });
+      setQrToken(selectedTable.qrToken);
+    }
+  };
+
+  const handleManualSubmit = (e) => {
+    e.preventDefault();
+    if (manualToken.trim()) {
+      localStorage.setItem("resto_table_token", manualToken.trim());
+      setSearchParams({ table: manualToken.trim() });
+      setQrToken(manualToken.trim());
+      setManualToken("");
+    }
+  };
+
+  const switchTable = () => {
+    localStorage.removeItem("resto_table_token");
+    setSearchParams({});
+    setQrToken("");
+    setTable(null);
+    setSessionId(null);
+    setCart([]);
+  };
 
   const startSession = async () => {
     if (!table) return;
@@ -42,6 +121,7 @@ const MenuPage = () => {
       const { data } = await api.post("/sessions", { tableId: table._id });
       setSessionId(data._id);
       setSuccess("Ordering session started! You can now add dishes to cart.");
+      setTimeout(() => setSuccess(""), 4000);
     } catch (err) {
       setError(err.response?.data?.message || "Failed to start session");
     }
@@ -88,8 +168,8 @@ const MenuPage = () => {
     try {
       await api.post("/orders", { sessionId, tableId: table._id, items: cart });
       setCart([]);
-      setSuccess("Order sent straight to kitchen chef!");
-      setTimeout(() => setSuccess(""), 4000);
+      setSuccess("Order sent straight to kitchen chef! 👨‍🍳 Watch the Kitchen Display update in real-time.");
+      setTimeout(() => setSuccess(""), 5000);
     } catch (err) {
       setError(err.response?.data?.message || "Failed to place order");
     } finally {
@@ -101,34 +181,100 @@ const MenuPage = () => {
     if (!sessionId) return;
     try {
       const { data } = await api.post(`/sessions/${sessionId}/request-bill`);
-      alert(`Bill requested for Table ${table?.tableNumber}! Total amount: ₹${data.totalAmount}. The cashier will settle your payment shortly.`);
+      setBillStatus({ requested: true, amount: data.totalAmount });
+      alert(`Bill requested for Table ${table?.tableNumber}! Total amount: ₹${data.totalAmount}. The cashier has received this on their POS screen.`);
     } catch (err) {
       setError(err.response?.data?.message || "Failed to request bill");
     }
   };
 
-  if (!qrToken) {
+  // If no table is active, show the interactive Table Selector
+  if (!qrToken || !table) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-center items-center px-4 py-12 text-center">
-        <div className="bg-slate-900 border border-slate-800 p-8 rounded-2xl max-w-md w-full shadow-2xl">
-          <span className="text-4xl block mb-3">📱</span>
-          <h1 className="text-xl font-bold text-white mb-2">No Table Detected</h1>
-          <p className="text-xs text-slate-400 mb-6 leading-relaxed">
-            To view the dining menu and place orders, please scan the QR code located on your table, or open a table link from the Owner Dashboard.
-          </p>
-          <div className="space-y-2">
-            <Link
-              to="/"
-              className="block w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 rounded-xl text-xs transition-colors"
-            >
-              Go to Home Portals
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-center items-center px-4 py-12">
+        <div className="bg-slate-900 border border-slate-800 p-8 rounded-2xl max-w-lg w-full shadow-2xl space-y-6">
+          <div className="text-center">
+            <span className="text-4xl block mb-2">🍽️</span>
+            <h1 className="text-xl font-bold text-white mb-1">Select Dining Table</h1>
+            <p className="text-xs text-slate-400">
+              Pick a table to view the digital menu and start ordering dishes straight to the kitchen.
+            </p>
+          </div>
+
+          {error && (
+            <div className="p-3 rounded-xl bg-red-950/60 border border-red-800 text-red-200 text-xs">
+              ⚠️ {error}
+            </div>
+          )}
+
+          {/* List of active tables */}
+          <div>
+            <h2 className="text-xs font-semibold text-slate-300 mb-3 flex items-center justify-between">
+              <span>Registered Tables in Restaurant</span>
+              {loadingTables && <span className="text-[10px] text-indigo-400">Refreshing...</span>}
+            </h2>
+
+            {loadingTables ? (
+              <div className="text-center py-6 text-xs text-slate-500">Loading tables...</div>
+            ) : availableTables.length === 0 ? (
+              <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 text-center text-xs text-slate-400">
+                No dining tables created yet. Please sign in as Owner to create dining tables.
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-3 max-h-56 overflow-y-auto pr-1">
+                {availableTables.map((t) => (
+                  <button
+                    key={t._id}
+                    onClick={() => handleSelectTable(t)}
+                    className="p-3.5 rounded-xl bg-slate-950 border border-slate-700 hover:border-pink-500 hover:bg-pink-950/20 text-left transition-all group cursor-pointer"
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-sm font-bold text-white group-hover:text-pink-300">
+                        Table #{t.tableNumber}
+                      </span>
+                      <span className="text-xs">🪑</span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 truncate block">
+                      {t.restaurantId?.name || "Main Dining"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Or Manual Table Token */}
+          <div className="pt-4 border-t border-slate-800">
+            <label className="block text-xs font-medium text-slate-300 mb-1.5">
+              Or Enter Table QR Token / Code
+            </label>
+            <form onSubmit={handleManualSubmit} className="flex gap-2">
+              <input
+                type="text"
+                value={manualToken}
+                onChange={(e) => setManualToken(e.target.value)}
+                placeholder="Paste table QR token..."
+                className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white flex-1 focus:outline-none focus:border-pink-500"
+              />
+              <button
+                type="submit"
+                className="bg-pink-600 hover:bg-pink-500 text-white font-semibold rounded-lg px-4 py-2 text-xs transition-colors cursor-pointer"
+              >
+                Connect Table →
+              </button>
+            </form>
+          </div>
+
+          {/* Quick link navigation */}
+          <div className="pt-2 flex items-center justify-between text-xs text-slate-400 border-t border-slate-800/80">
+            <Link to="/" className="hover:text-white transition-colors">
+              ← Portal Home
             </Link>
-            <Link
-              to="/owner"
-              className="block w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium py-2 rounded-xl text-xs transition-colors border border-slate-700"
-            >
-              Open Owner Dashboard (To View Tables)
-            </Link>
+            {user?.role === "owner" && (
+              <Link to="/owner" className="text-indigo-400 hover:text-indigo-300 font-medium">
+                Owner Dashboard →
+              </Link>
+            )}
           </div>
         </div>
       </div>
@@ -144,20 +290,28 @@ const MenuPage = () => {
         <div className="max-w-md mx-auto flex justify-between items-center">
           <div>
             <h1 className="text-sm font-bold text-white">
-              {table ? table.restaurantId?.name || "Restaurant Menu" : "Loading..."}
+              {table.restaurantId?.name || "Restaurant Menu"}
             </h1>
-            <p className="text-[11px] text-amber-400 font-semibold">
-              {table ? `Table #${table.tableNumber}` : "Detecting table..."}
-            </p>
+            <div className="flex items-center gap-2 mt-0.5">
+              <span className="text-[11px] text-amber-400 font-bold bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                Table #{table.tableNumber}
+              </span>
+              <button
+                onClick={switchTable}
+                className="text-[10px] text-slate-400 hover:text-pink-300 underline cursor-pointer"
+              >
+                Change Table
+              </button>
+            </div>
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="text-[11px] text-slate-400">
+            <span className="text-[11px] text-slate-300 font-medium">
               {user ? user.name : "Diner"}
             </span>
             <button
               onClick={logout}
-              className="text-[10px] text-slate-400 hover:text-white border border-slate-700 px-2 py-1 rounded"
+              className="text-[10px] text-slate-400 hover:text-white border border-slate-700 hover:border-slate-500 px-2.5 py-1 rounded transition-colors cursor-pointer"
             >
               Logout
             </button>
@@ -168,14 +322,32 @@ const MenuPage = () => {
       {/* Main Container */}
       <main className="max-w-md mx-auto px-4 py-4 space-y-4">
         {error && (
-          <div className="p-3 rounded-xl bg-red-950/60 border border-red-800 text-red-200 text-xs">
-            ⚠️ {error}
+          <div className="p-3 rounded-xl bg-red-950/60 border border-red-800 text-red-200 text-xs flex items-center gap-2">
+            <span>⚠️</span>
+            <span>{error}</span>
           </div>
         )}
 
         {success && (
-          <div className="p-3 rounded-xl bg-emerald-950/60 border border-emerald-800 text-emerald-200 text-xs">
-            ✅ {success}
+          <div className="p-3 rounded-xl bg-emerald-950/60 border border-emerald-800 text-emerald-200 text-xs flex items-center gap-2">
+            <span>✅</span>
+            <span>{success}</span>
+          </div>
+        )}
+
+        {/* Bill requested banner */}
+        {billStatus?.requested && (
+          <div className="bg-amber-950/50 border border-amber-800/80 p-3.5 rounded-xl text-amber-200 text-xs flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-base">🔔</span>
+              <div>
+                <p className="font-bold">Bill Requested</p>
+                <p className="text-[11px] text-amber-300/80">Cashier is preparing your final receipt</p>
+              </div>
+            </div>
+            {billStatus.amount ? (
+              <span className="font-bold text-amber-300 text-sm">₹{billStatus.amount}</span>
+            ) : null}
           </div>
         )}
 
@@ -245,7 +417,7 @@ const MenuPage = () => {
 
         {menuItems.length === 0 && (
           <div className="p-8 text-center bg-slate-900/50 border border-slate-800 rounded-xl text-xs text-slate-400">
-            No dishes available for this restaurant yet.
+            No dishes added for this restaurant yet. (Owner can add items from the Menu tab in Owner Dashboard)
           </div>
         )}
       </main>

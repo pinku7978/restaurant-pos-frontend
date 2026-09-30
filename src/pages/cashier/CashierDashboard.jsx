@@ -9,6 +9,7 @@ const CashierDashboard = () => {
   const [bills, setBills] = useState([]);
   const [alertBillId, setAlertBillId] = useState(null); // highlights newest bill
   const [loading, setLoading] = useState(true);
+  const [connected, setConnected] = useState(false);
   const audioRef = useRef(null);
 
   // Load pending bills initially
@@ -27,12 +28,28 @@ const CashierDashboard = () => {
   // Socket.IO real-time listener for bill requests & payments
   useEffect(() => {
     const socketUrl = import.meta.env.VITE_SOCKET_URL || "http://localhost:5000";
-    const socket = io(socketUrl);
+    const socket = io(socketUrl, {
+      transports: ["websocket", "polling"],
+      reconnectionAttempts: 10,
+      reconnectionDelay: 1000
+    });
 
-    const restaurantId = user?.restaurantId;
-    if (restaurantId) {
-      socket.emit("join_room", { restaurantId, screen: "cashier" });
-    }
+    socket.on("connect", () => {
+      setConnected(true);
+      const restaurantId = user?.restaurantId;
+      if (restaurantId) {
+        socket.emit("join_room", { restaurantId, screen: "cashier" });
+      }
+    });
+
+    socket.on("disconnect", () => {
+      setConnected(false);
+    });
+
+    socket.on("connect_error", (err) => {
+      console.warn("Cashier socket error:", err.message);
+      setConnected(false);
+    });
 
     socket.on("bill_requested", (bill) => {
       setBills((prev) => {
@@ -79,6 +96,14 @@ const CashierDashboard = () => {
               <h1 className="text-xl font-bold text-white tracking-tight">Cashier Billing & POS</h1>
               <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                 Front Desk
+              </span>
+              <span className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border flex items-center gap-1.5 ${
+                connected
+                  ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+                  : "bg-red-500/20 text-red-300 border-red-500/30"
+              }`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${connected ? "bg-emerald-400 animate-pulse" : "bg-red-400"}`} />
+                {connected ? "Socket Online" : "Reconnecting..."}
               </span>
             </div>
             <p className="text-xs text-slate-400">

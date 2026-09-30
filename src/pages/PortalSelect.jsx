@@ -239,17 +239,25 @@ const PortalSelect = () => {
 
             <div className="space-y-2 pt-4 border-t border-slate-800">
               <Link
-                to="/login"
-                className="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium py-2.5 rounded-xl block text-center border border-slate-700 transition-all"
+                to="/menu"
+                className="w-full bg-pink-600 hover:bg-pink-500 text-white text-xs font-semibold py-2.5 rounded-xl block text-center shadow-md shadow-pink-600/20 transition-all"
               >
-                Customer Sign In
+                🍽️ Open Dining Menu / Tables
               </Link>
-              <Link
-                to="/signup"
-                className="w-full text-xs text-pink-400 hover:text-pink-300 font-medium py-1 block text-center transition-all"
-              >
-                Create Diner Account →
-              </Link>
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <Link
+                  to="/login"
+                  className="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium py-2 rounded-xl block text-center border border-slate-700 transition-all"
+                >
+                  Sign In
+                </Link>
+                <Link
+                  to="/signup"
+                  className="bg-slate-800 hover:bg-slate-700 text-pink-400 hover:text-pink-300 text-xs font-medium py-2 rounded-xl block text-center border border-slate-700 transition-all"
+                >
+                  Register
+                </Link>
+              </div>
             </div>
           </div>
         </div>

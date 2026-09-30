@@ -41,7 +41,7 @@ function App() {
           <Route
             path="/kitchen"
             element={
-              <ProtectedRoute allowedRoles={["chef"]}>
+              <ProtectedRoute allowedRoles={["chef", "owner"]}>
                 <KitchenDisplay />
               </ProtectedRoute>
             }
@@ -49,7 +49,7 @@ function App() {
           <Route
             path="/cashier"
             element={
-              <ProtectedRoute allowedRoles={["cashier"]}>
+              <ProtectedRoute allowedRoles={["cashier", "owner"]}>
                 <CashierDashboard />
               </ProtectedRoute>
             }

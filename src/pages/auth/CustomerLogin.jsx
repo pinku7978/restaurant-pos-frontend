@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import api from "../../api/axiosInstance";
 import { useAuth } from "../../context/AuthContext";
@@ -8,10 +8,29 @@ const CustomerLogin = () => {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const { login } = useAuth();
+  const { user, login } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const table = searchParams.get("table");
+  const tableParam = searchParams.get("table");
+
+  const [table, setTable] = useState(() => {
+    return tableParam || localStorage.getItem("resto_table_token") || "";
+  });
+
+  useEffect(() => {
+    if (tableParam) {
+      localStorage.setItem("resto_table_token", tableParam);
+      setTable(tableParam);
+    }
+  }, [tableParam]);
+
+  // If already authenticated, redirect straight to dining menu
+  useEffect(() => {
+    if (user && (user.role === "customer" || user.role === "owner")) {
+      const activeTable = table || localStorage.getItem("resto_table_token");
+      navigate(activeTable ? `/menu?table=${activeTable}` : "/menu");
+    }
+  }, [user, table, navigate]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -21,7 +40,8 @@ const CustomerLogin = () => {
     try {
       const { data } = await api.post("/auth/customer/login", { phone, password });
       login(data);
-      navigate(table ? `/menu?table=${table}` : "/menu");
+      const activeTable = table || localStorage.getItem("resto_table_token");
+      navigate(activeTable ? `/menu?table=${activeTable}` : "/menu");
     } catch (err) {
       console.error("Customer login error:", err);
       const msg =

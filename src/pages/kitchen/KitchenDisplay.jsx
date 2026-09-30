@@ -29,30 +29,55 @@ const KitchenDisplay = () => {
   const [orders, setOrders] = useState([]);
   const [muted, setMuted] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [connected, setConnected] = useState(false);
   const socketRef = useRef(null);
 
-  // Initial load: fetch all active kitchen orders
-  useEffect(() => {
+  const fetchOrders = () => {
     setLoading(true);
     api.get("/orders/kitchen")
       .then(({ data }) => setOrders(data))
       .catch((err) => console.error("Error fetching kitchen orders:", err))
       .finally(() => setLoading(false));
+  };
+
+  // Initial load: fetch all active kitchen orders
+  useEffect(() => {
+    fetchOrders();
   }, []);
 
   // Real-time channel with Socket.IO
   useEffect(() => {
     const socketUrl = import.meta.env.VITE_SOCKET_URL || "http://localhost:5000";
-    const socket = io(socketUrl);
+    const socket = io(socketUrl, {
+      transports: ["websocket", "polling"],
+      reconnectionAttempts: 10,
+      reconnectionDelay: 1000
+    });
     socketRef.current = socket;
 
-    const restaurantId = user?.restaurantId;
-    if (restaurantId) {
-      socket.emit("join_room", { restaurantId, screen: "kitchen" });
-    }
+    socket.on("connect", () => {
+      setConnected(true);
+      const restaurantId = user?.restaurantId;
+      if (restaurantId) {
+        socket.emit("join_room", { restaurantId, screen: "kitchen" });
+      }
+    });
+
+    socket.on("disconnect", () => {
+      setConnected(false);
+    });
+
+    socket.on("connect_error", (err) => {
+      console.warn("Kitchen socket error:", err.message);
+      setConnected(false);
+    });
 
     socket.on("new_order", (order) => {
-      setOrders((prev) => [order, ...prev]);
+      setOrders((prev) => {
+        // avoid duplicate orders if socket emits multiple times
+        if (prev.some((o) => o._id === order._id)) return prev;
+        return [order, ...prev];
+      });
       announceOrder(order, muted);
     });
 
@@ -99,6 +124,14 @@ const KitchenDisplay = () => {
               <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
                 Live Kitchen
               </span>
+              <span className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border flex items-center gap-1.5 ${
+                connected
+                  ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+                  : "bg-red-500/20 text-red-300 border-red-500/30"
+              }`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${connected ? "bg-emerald-400 animate-pulse" : "bg-red-400"}`} />
+                {connected ? "Socket Online" : "Reconnecting..."}
+              </span>
             </div>
             <p className="text-xs text-slate-400">
               Active Orders in Queue: <strong className="text-white">{orders.length}</strong>
@@ -107,12 +140,20 @@ const KitchenDisplay = () => {
         </div>
 
         <div className="flex items-center gap-2 w-full sm:w-auto">
+          <button
+            onClick={fetchOrders}
+            className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg px-2.5 py-1.5 font-medium transition-colors cursor-pointer"
+            title="Refresh order queue manually"
+          >
+            🔄 Refresh
+          </button>
+
           {user?.role === "owner" && (
             <Link
               to="/owner"
               className="text-xs bg-indigo-950/80 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/60 rounded-lg px-3 py-1.5 font-medium transition-colors"
             >
-              ← Back to Owner Dashboard
+              ← Back to Owner
             </Link>
           )}
 
