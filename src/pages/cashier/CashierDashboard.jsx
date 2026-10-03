@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { io } from "socket.io-client";
 import api from "../../api/axiosInstance";
 import { useAuth } from "../../context/AuthContext";
+import { loadRazorpayScript } from "../../utils/razorpay";
 
 const CashierDashboard = () => {
   const { user, logout } = useAuth();
@@ -10,6 +11,8 @@ const CashierDashboard = () => {
   const [alertBillId, setAlertBillId] = useState(null); // highlights newest bill
   const [loading, setLoading] = useState(true);
   const [connected, setConnected] = useState(false);
+  const [processingBillId, setProcessingBillId] = useState(null);
+  const [successToast, setSuccessToast] = useState("");
   const audioRef = useRef(null);
 
   // Load pending bills initially
@@ -67,13 +70,86 @@ const CashierDashboard = () => {
     return () => socket.disconnect();
   }, [user?.restaurantId]);
 
+  // Offline / Manual settlement (Cash or external card)
   const markPaid = async (billId, paymentMethod) => {
     try {
       await api.patch(`/bills/${billId}/pay`, { paymentMethod });
       setBills((prev) => prev.filter((b) => b._id !== billId));
+      setSuccessToast(`Bill settled successfully as ${paymentMethod.toUpperCase()}`);
+      setTimeout(() => setSuccessToast(""), 4000);
     } catch (err) {
       console.error("Failed to mark bill paid:", err);
       alert(err.response?.data?.message || "Failed to settle bill");
+    }
+  };
+
+  // Reception Razorpay flow: opens Razorpay Checkout with UPI QR / Cards
+  const collectRazorpay = async (bill) => {
+    try {
+      setProcessingBillId(bill._id);
+
+      // 1. Create order on backend
+      const { data: orderData } = await api.post(`/bills/${bill._id}/create-payment-order`);
+
+      // 2. Load script
+      const scriptReady = await loadRazorpayScript();
+      if (!scriptReady) {
+        throw new Error("Unable to load Razorpay Checkout SDK");
+      }
+
+      const tableNum =
+        bill.tableId?.tableNumber ??
+        bill.tableNumber ??
+        (typeof bill.tableId === "string" ? bill.tableId.slice(-4) : "—");
+
+      // 3. Launch Checkout
+      const options = {
+        key: orderData.keyId,
+        amount: orderData.amount,
+        currency: orderData.currency || "INR",
+        name: "RestoPulse Front Desk POS",
+        description: `Settle Table #${tableNum} Bill`,
+        order_id: orderData.orderId,
+        handler: async function (response) {
+          try {
+            await api.post(`/bills/${bill._id}/verify-payment`, {
+              razorpayOrderId: response.razorpay_order_id,
+              razorpayPaymentId: response.razorpay_payment_id,
+              razorpaySignature: response.razorpay_signature
+            });
+            setBills((prev) => prev.filter((b) => b._id !== bill._id));
+            setSuccessToast(`Table #${tableNum} settled via Razorpay! Payment ID: ${response.razorpay_payment_id}`);
+            setTimeout(() => setSuccessToast(""), 5000);
+          } catch (verifyErr) {
+            alert(verifyErr.response?.data?.message || "Payment verification failed");
+          } finally {
+            setProcessingBillId(null);
+          }
+        },
+        prefill: {
+          name: "Front Desk Diner",
+          contact: ""
+        },
+        theme: {
+          color: "#059669"
+        },
+        modal: {
+          ondismiss: function () {
+            setProcessingBillId(null);
+          }
+        }
+      };
+
+      const rzp = new window.Razorpay(options);
+      rzp.on("payment.failed", function (response) {
+        alert(`Payment failed: ${response.error?.description || "Transaction rejected"}`);
+        setProcessingBillId(null);
+      });
+      rzp.open();
+    } catch (err) {
+      console.error("Cashier Razorpay error:", err);
+      alert(err.response?.data?.message || err.message || "Failed to start Razorpay payment");
+      setProcessingBillId(null);
     }
   };
 
@@ -138,6 +214,22 @@ const CashierDashboard = () => {
         </div>
       </header>
 
+      {/* Floating Success Alert Toast */}
+      {successToast && (
+        <div className="mb-6 p-3.5 rounded-xl bg-emerald-950/70 border border-emerald-700/80 text-emerald-200 text-xs flex items-center justify-between shadow-xl">
+          <div className="flex items-center gap-2">
+            <span className="text-base">✅</span>
+            <span className="font-semibold">{successToast}</span>
+          </div>
+          <button
+            onClick={() => setSuccessToast("")}
+            className="text-emerald-400 hover:text-white text-xs px-2"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Bills Grid */}
       {loading ? (
         <div className="p-12 text-center bg-slate-900/50 border border-slate-800 rounded-2xl text-xs text-slate-400">
@@ -160,6 +252,7 @@ const CashierDashboard = () => {
               (typeof bill.tableId === "string" ? bill.tableId.slice(-4) : "—");
 
             const isFlashing = bill._id === alertBillId;
+            const isProcessing = processingBillId === bill._id;
 
             return (
               <div
@@ -206,19 +299,36 @@ const CashierDashboard = () => {
                 </div>
 
                 {/* Settle Payment Buttons */}
-                <div className="grid grid-cols-2 gap-2 mt-5 pt-3 border-t border-slate-800">
+                <div className="space-y-2 mt-5 pt-3 border-t border-slate-800">
+                  {/* Razorpay Online / QR Collection */}
                   <button
-                    onClick={() => markPaid(bill._id, "cash")}
-                    className="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-2 px-3 rounded-xl text-xs shadow-md shadow-emerald-600/20 transition-colors cursor-pointer"
+                    onClick={() => collectRazorpay(bill)}
+                    disabled={isProcessing}
+                    className="w-full bg-gradient-to-r from-emerald-600 via-teal-600 to-indigo-600 hover:from-emerald-500 hover:to-indigo-500 text-white font-bold py-2.5 px-3 rounded-xl text-xs shadow-md shadow-indigo-600/20 transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
                   >
-                    💵 Paid (Cash)
+                    <span>💳</span>
+                    <span>{isProcessing ? "Opening Razorpay POS..." : "Collect via Razorpay (UPI QR / Card)"}</span>
                   </button>
-                  <button
-                    onClick={() => markPaid(bill._id, "card")}
-                    className="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2 px-3 rounded-xl text-xs shadow-md shadow-indigo-600/20 transition-colors cursor-pointer"
-                  >
-                    💳 Paid (Card/UPI)
-                  </button>
+
+                  {/* Manual Cash or Card Settlement */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => markPaid(bill._id, "cash")}
+                      disabled={isProcessing}
+                      className="bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700 font-semibold py-2 px-3 rounded-xl text-xs transition-colors cursor-pointer flex items-center justify-center gap-1"
+                    >
+                      <span>💵</span>
+                      <span>Cash</span>
+                    </button>
+                    <button
+                      onClick={() => markPaid(bill._id, "card")}
+                      disabled={isProcessing}
+                      className="bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700 font-semibold py-2 px-3 rounded-xl text-xs transition-colors cursor-pointer flex items-center justify-center gap-1"
+                    >
+                      <span>📠</span>
+                      <span>External POS</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             );

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import api from "../../api/axiosInstance";
 import { useAuth } from "../../context/AuthContext";
+import { loadRazorpayScript } from "../../utils/razorpay";
 
 const MenuPage = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -19,7 +20,8 @@ const MenuPage = () => {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
-  const [billStatus, setBillStatus] = useState(null); // { requested: true, amount: 0 }
+  const [billStatus, setBillStatus] = useState(null); // { requested: true, amount: 0, billId: null, paid: false }
+  const [paymentSuccessModal, setPaymentSuccessModal] = useState(null);
 
   // Available tables when no table is selected
   const [availableTables, setAvailableTables] = useState([]);
@@ -37,7 +39,6 @@ const MenuPage = () => {
   // Step 1: resolve the QR token into table + restaurant info
   useEffect(() => {
     if (!qrToken) {
-      // If no token, fetch public tables for selection
       setLoadingTables(true);
       api
         .get("/tables/public")
@@ -75,12 +76,17 @@ const MenuPage = () => {
     // Check for existing active session on this table so diner doesn't have to restart
     api
       .get(`/sessions/table/${table._id}`)
-      .then(({ data }) => {
+      .then(async ({ data }) => {
         if (data && data.length > 0) {
           const active = data[0];
           setSessionId(active._id);
           if (active.status === "bill_requested") {
-            setBillStatus({ requested: true });
+            try {
+              const { data: bill } = await api.get(`/bills/session/${active._id}`);
+              setBillStatus({ requested: true, amount: bill.totalAmount, billId: bill._id });
+            } catch {
+              setBillStatus({ requested: true });
+            }
           }
         }
       })
@@ -112,6 +118,7 @@ const MenuPage = () => {
     setTable(null);
     setSessionId(null);
     setCart([]);
+    setBillStatus(null);
   };
 
   const startSession = async () => {
@@ -180,11 +187,105 @@ const MenuPage = () => {
   const requestBill = async () => {
     if (!sessionId) return;
     try {
+      setLoading(true);
       const { data } = await api.post(`/sessions/${sessionId}/request-bill`);
-      setBillStatus({ requested: true, amount: data.totalAmount });
-      alert(`Bill requested for Table ${table?.tableNumber}! Total amount: ₹${data.totalAmount}. The cashier has received this on their POS screen.`);
+      setBillStatus({ requested: true, amount: data.totalAmount, billId: data._id });
+      setSuccess(`Bill requested for Table #${table?.tableNumber}! Total: ₹${data.totalAmount}. The cashier has received this on their POS.`);
+      setTimeout(() => setSuccess(""), 5000);
     } catch (err) {
       setError(err.response?.data?.message || "Failed to request bill");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Pay Online via Razorpay
+  const payOnline = async () => {
+    if (!sessionId && !billStatus?.billId) {
+      setError("No active dining session found to pay.");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+
+    try {
+      let targetBillId = billStatus?.billId;
+      let billTotal = billStatus?.amount;
+
+      // If bill is not yet generated, request it now
+      if (!targetBillId) {
+        const { data: generatedBill } = await api.post(`/sessions/${sessionId}/request-bill`);
+        targetBillId = generatedBill._id;
+        billTotal = generatedBill.totalAmount;
+        setBillStatus({ requested: true, amount: billTotal, billId: targetBillId });
+      }
+
+      // 1. Create order on backend
+      const { data: orderData } = await api.post(`/bills/${targetBillId}/create-payment-order`);
+
+      // 2. Load script
+      const scriptReady = await loadRazorpayScript();
+      if (!scriptReady) {
+        throw new Error("Unable to load Razorpay Checkout SDK. Please verify internet connection.");
+      }
+
+      // 3. Launch Checkout
+      const options = {
+        key: orderData.keyId,
+        amount: orderData.amount,
+        currency: orderData.currency || "INR",
+        name: table?.restaurantId?.name || "Restaurant Bill",
+        description: `Dining Bill for Table #${table?.tableNumber}`,
+        order_id: orderData.orderId,
+        handler: async function (response) {
+          try {
+            setLoading(true);
+            await api.post(`/bills/${targetBillId}/verify-payment`, {
+              razorpayOrderId: response.razorpay_order_id,
+              razorpayPaymentId: response.razorpay_payment_id,
+              razorpaySignature: response.razorpay_signature
+            });
+
+            setPaymentSuccessModal({
+              paymentId: response.razorpay_payment_id,
+              amount: billTotal || (orderData.amount / 100),
+              tableNumber: table?.tableNumber
+            });
+            setBillStatus({ requested: true, paid: true, amount: billTotal });
+            setSessionId(null);
+            setCart([]);
+            localStorage.removeItem("resto_table_token");
+          } catch (verifyErr) {
+            setError(verifyErr.response?.data?.message || "Payment verification failed. Please check with the cashier.");
+          } finally {
+            setLoading(false);
+          }
+        },
+        prefill: {
+          name: user?.name || "Diner",
+          contact: user?.phone || ""
+        },
+        theme: {
+          color: "#4f46e5"
+        },
+        modal: {
+          ondismiss: function () {
+            setLoading(false);
+          }
+        }
+      };
+
+      const rzp = new window.Razorpay(options);
+      rzp.on("payment.failed", function (response) {
+        setError(`Payment failed: ${response.error?.description || "Payment cancelled or rejected"}`);
+        setLoading(false);
+      });
+      rzp.open();
+    } catch (err) {
+      console.error("Razorpay initiation error:", err);
+      setError(err.response?.data?.message || err.message || "Failed to initiate payment");
+      setLoading(false);
     }
   };
 
@@ -285,6 +386,52 @@ const MenuPage = () => {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 pb-36">
+      {/* Payment Success Celebration Modal */}
+      {paymentSuccessModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-emerald-500/40 rounded-2xl max-w-sm w-full p-6 text-center space-y-4 shadow-2xl">
+            <div className="w-16 h-16 bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 rounded-full flex items-center justify-center text-3xl mx-auto shadow-lg shadow-emerald-500/20">
+              ✓
+            </div>
+            <div>
+              <h2 className="text-lg font-black text-white">Payment Successful!</h2>
+              <p className="text-xs text-slate-400 mt-0.5">Thank you for dining with us</p>
+            </div>
+
+            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3.5 space-y-2 text-xs">
+              <div className="flex justify-between text-slate-400">
+                <span>Table:</span>
+                <span className="font-bold text-white">#{paymentSuccessModal.tableNumber}</span>
+              </div>
+              <div className="flex justify-between text-slate-400">
+                <span>Amount Paid:</span>
+                <span className="font-extrabold text-emerald-400 text-sm">₹{paymentSuccessModal.amount}</span>
+              </div>
+              <div className="flex justify-between text-slate-400">
+                <span>Payment ID:</span>
+                <span className="font-mono text-[10px] text-slate-300 truncate max-w-[140px]">
+                  {paymentSuccessModal.paymentId}
+                </span>
+              </div>
+              <div className="flex justify-between text-slate-400">
+                <span>Gateway:</span>
+                <span className="font-semibold text-indigo-400">Razorpay Verified</span>
+              </div>
+            </div>
+
+            <button
+              onClick={() => {
+                setPaymentSuccessModal(null);
+                setBillStatus(null);
+              }}
+              className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2.5 rounded-xl text-xs transition-colors cursor-pointer shadow-lg shadow-emerald-600/30"
+            >
+              Done & Finish
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Top Diner Bar */}
       <header className="sticky top-0 z-20 bg-slate-900/90 border-b border-slate-800 backdrop-blur-md px-4 py-3">
         <div className="max-w-md mx-auto flex justify-between items-center">
@@ -336,22 +483,38 @@ const MenuPage = () => {
         )}
 
         {/* Bill requested banner */}
-        {billStatus?.requested && (
-          <div className="bg-amber-950/50 border border-amber-800/80 p-3.5 rounded-xl text-amber-200 text-xs flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className="text-base">🔔</span>
-              <div>
-                <p className="font-bold">Bill Requested</p>
-                <p className="text-[11px] text-amber-300/80">Cashier is preparing your final receipt</p>
+        {billStatus?.requested && !billStatus?.paid && (
+          <div className="bg-amber-950/50 border border-amber-800/80 p-4 rounded-2xl text-amber-200 text-xs space-y-3 shadow-lg">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-2xl">🧾</span>
+                <div>
+                  <p className="font-bold text-sm text-white">Bill Generated</p>
+                  <p className="text-[11px] text-amber-300/80">Table #{table?.tableNumber} is ready to settle</p>
+                </div>
+              </div>
+              {billStatus.amount ? (
+                <span className="font-black text-emerald-400 text-lg">₹{billStatus.amount}</span>
+              ) : null}
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              <button
+                onClick={payOnline}
+                disabled={loading}
+                className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold py-2 px-3 rounded-xl text-xs transition-all shadow-md shadow-emerald-600/30 flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <span>💳</span>
+                <span>Pay Online</span>
+              </button>
+              <div className="text-center text-[10px] text-amber-300/70 flex items-center justify-center border border-amber-800/50 rounded-xl px-2">
+                Or pay Cash at Counter
               </div>
             </div>
-            {billStatus.amount ? (
-              <span className="font-bold text-amber-300 text-sm">₹{billStatus.amount}</span>
-            ) : null}
           </div>
         )}
 
-        {!sessionId && table && (
+        {!sessionId && table && !billStatus?.requested && (
           <div className="bg-gradient-to-r from-emerald-950/50 to-teal-950/40 border border-emerald-800/60 p-4 rounded-2xl text-center">
             <p className="text-xs text-emerald-200 mb-3">
               Ready to dine at Table #{table.tableNumber}? Start your ordering session below.
@@ -466,14 +629,25 @@ const MenuPage = () => {
         </div>
       )}
 
-      {/* Call for Bill button */}
+      {/* Payment and Bill Request Buttons */}
       {sessionId && (
-        <div className="max-w-md mx-auto px-4 mt-6">
+        <div className="max-w-md mx-auto px-4 mt-6 space-y-2.5">
+          <button
+            onClick={payOnline}
+            disabled={loading}
+            className="w-full bg-gradient-to-r from-emerald-600 via-teal-600 to-indigo-600 hover:from-emerald-500 hover:to-indigo-500 text-white font-bold py-3 rounded-xl text-xs shadow-lg shadow-indigo-500/20 transition-all flex items-center justify-center gap-2 cursor-pointer"
+          >
+            <span>💳</span>
+            <span>{loading ? "Connecting to Razorpay..." : "Pay Online Now (Razorpay UPI / Cards)"}</span>
+          </button>
+
           <button
             onClick={requestBill}
-            className="w-full bg-slate-900 hover:bg-slate-800 text-amber-300 border border-amber-600/40 font-semibold py-2.5 rounded-xl text-xs transition-colors cursor-pointer"
+            disabled={loading}
+            className="w-full bg-slate-900 hover:bg-slate-800 text-amber-300 border border-amber-600/40 font-semibold py-2.5 rounded-xl text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer"
           >
-            🔔 Request Final Bill from Cashier
+            <span>🔔</span>
+            <span>Request Bill from Cashier (Cash Payment)</span>
           </button>
         </div>
       )}
